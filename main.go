@@ -42,11 +42,11 @@ func main() {
 	hash_hello := sha256.Sum256([]byte("hello"))
 	fmt.Println("hash hello", hash_hello)
 
-	fmt.Println("Average hashes \n")
+	fmt.Println("Average hashes")
 	fmt.Println(hash.ToString())
 	fmt.Println(hash_c.ToString())
 
-	fmt.Println("Perceptual hashes \n")
+	fmt.Println("Perceptual hashes ")
 	fmt.Println(hash2.ToString())
 	fmt.Println(hash2_c.ToString())
 
