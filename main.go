@@ -1,17 +1,16 @@
 package main
 
 import (
-
 	"encoding/json"
 	"fmt"
 	"github.com/corona10/goimagehash"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"io/ioutil"
+	"net/http"
 	"time"
-
 	"math/big"
 	"strconv"
-
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/urfave/cli"
@@ -26,6 +25,7 @@ type Configuration struct {
 	PrivateKey string
 	ContractAddress string
 }
+
 
 
 var endpoint = "https://rinkeby.infura.io/fYe8qCnWi6TXZAXOVof9"
@@ -169,15 +169,19 @@ func returnImproContract()(*Impro, error){
 
 func registerImage(c *cli.Context){
 	if c.NArg() < 2 {
-		log.Println("Please provide a valid filename and price for the image")
+		log.Fatal("Please provide a valid filename and price for the image")
 	}
-	priceString := c.Args().Get(0)
-	price, err := strconv.Atoi(priceString)
-	if int(price) == 0 {
+	priceString := c.Args().Get(1)
+	price, err := strconv.ParseFloat(priceString, 64)
+	ethPrice := getEthPrice()
+	var ratio float64
+	ratio  = price/ethPrice
+	//convert price from dollars to weis
+	sendingPrice  := int(ratio*1000000000000000000)
+	if sendingPrice == 0 {
 		log.Println("You entered a price of 0. Anyone can get the rights to your image. Switching to non buyable image")
 		price = -1
 	}
-
 	contract, err := returnImproContract()
 	if err != nil {
 		log.Println("Error registering image", err)
@@ -198,8 +202,6 @@ func registerImage(c *cli.Context){
 	if err != nil {
 		log.Fatal("Error in generating hash")
 	}
-
-
 	auth := bind.NewKeyedTransactor(key)
 	options := bind.TransactOpts{
 		auth.From,
@@ -211,13 +213,13 @@ func registerImage(c *cli.Context){
 		auth.Context,
 	}
 
-	tx, err := contract.Register(&options, hash, big.NewInt(int64(price)))
+	tx, err := contract.Register(&options, hash, big.NewInt(int64(sendingPrice)))
 	if err != nil {
 		log.Fatal("Error with the register transaction : ", err)
 	}
-	fmt.Println("Transaction was successful. Tx hash : ", tx.Hash())
+	log.Println("Transaction was successful. Tx hash : ", tx.Hash().Hex())
+	log.Println("Uploaded perceptual hash :", hash)
 }
-
 
 func getTimestamp(c *cli.Context){
 	if c.NArg() < 1 {
@@ -232,7 +234,7 @@ func getTimestamp(c *cli.Context){
 		log.Println("Error getting timestamp")
 	}
 	fmt.Println(time.Unix(timestamp.Int64(), 0))
-	fmt.Println(timestamp)
+	//fmt.Println(timestamp)
 }
 
 
@@ -246,11 +248,31 @@ func getPrice(c *cli.Context){
 	}
 	price, err := contract.GetPrice(&bind.CallOpts{}, c.Args().First())
 	if err != nil {
-		log.Println("Error getting timestamp")
+		log.Println("Error getting price")
 	}
-	fmt.Println(price)
-}
+	if price.Int64() == -1{
+		log.Println("This is image can't be bought")
 
+	} else {
+		var marketPrice float64
+		marketPrice = getEthPrice()*float64(price.Int64())/1e18
+		fmt.Println(marketPrice, "$")
+	}
+
+}
+func returnPrice(hash string)(*big.Int, error){
+	contract, err := returnImproContract()
+	if err != nil {
+		log.Println("Error getting contract impro", err)
+		return nil, err
+	}
+	price, err := contract.GetPrice(&bind.CallOpts{}, hash)
+	if err != nil {
+		log.Println("Error getting timestamp")
+		return nil, err
+	}
+	return price, nil
+}
 
 func getOwner(c *cli.Context){
 	if c.NArg() < 1 {
@@ -267,6 +289,145 @@ func getOwner(c *cli.Context){
 	fmt.Println(owner.Hex())
 }
 
+
+func exists(c *cli.Context){
+	if c.NArg() < 1 {
+		log.Println("Please provide a valid hash")
+	}
+	contract, err := returnImproContract()
+	if err != nil {
+		log.Println("Error registering image", err)
+	}
+	exist, err := contract.Exists(&bind.CallOpts{}, c.Args().First())
+	if err != nil {
+		log.Println("Error getting timestamp")
+	}
+	if exist {
+		fmt.Println("The hash ", c.Args().First(), " exists on the impro contract.")
+	} else {
+		fmt.Println("This image hash was not yet uploaded.")
+	}
+}
+
+
+func buy(c *cli.Context) {
+	if c.NArg() < 1 {
+		log.Println("Please provide a valid hash")
+	}
+	hash := c.Args().First()
+	price, err := returnPrice(hash)
+	if err != nil {
+		log.Fatal("Error getting price of image")
+	}
+	contract, err := returnImproContract()
+	if err != nil {
+		log.Println("Error getting impro contract", err)
+	}
+	keyString, err := getKey()
+	if err != nil {
+		log.Println("Error registering image", err)
+	}
+	key, err := crypto.HexToECDSA(keyString)
+	if err != nil {
+		log.Println("Error impossible to decode key to valid ECDSA key", err)
+	}
+
+	auth := bind.NewKeyedTransactor(key)
+	options := bind.TransactOpts{
+		auth.From,
+		auth.Nonce,
+		auth.Signer,
+		price,
+		big.NewInt(gasP),
+		gasL,
+		auth.Context,
+	}
+	tx, err := contract.Buy(&options, hash)
+	if err != nil {
+		log.Fatal("Error issuing buy transaction")
+	}
+	log.Println("Succesful buy transaction! Transaction receipt: ", tx.Hash().Hex())
+}
+
+func transfer(c *cli.Context) {
+	if c.NArg() < 2{
+		log.Println("Please provide a valid hash and address of new owner")
+	}
+	hash := c.Args().First()
+	addressString := c.Args().Get(1)
+	address := common.HexToAddress(addressString)
+	contract, err := returnImproContract()
+	if err != nil {
+		log.Println("Error getting impro contract", err)
+	}
+	keyString, err := getKey()
+	if err != nil {
+		log.Println("Error registering image", err)
+	}
+	key, err := crypto.HexToECDSA(keyString)
+	if err != nil {
+		log.Println("Error impossible to decode key to valid ECDSA key", err)
+	}
+
+	auth := bind.NewKeyedTransactor(key)
+	options := bind.TransactOpts{
+		auth.From,
+		auth.Nonce,
+		auth.Signer,
+		big.NewInt(0),
+		big.NewInt(gasP),
+		gasL,
+		auth.Context,
+	}
+	tx, err := contract.Transfer(&options, hash, address)
+	if err != nil {
+		log.Fatal("Error issuing buy transaction")
+	}
+	log.Println("Succesful transfer transaction! Transaction receipt: ", tx.Hash().Hex())
+}
+
+
+func changePrice(c *cli.Context) {
+	if c.NArg() < 1 {
+		log.Println("Please provide a valid hash and new price")
+	}
+	hash := c.Args().First()
+	priceString := c.Args().Get(1)
+	price, err := strconv.ParseFloat(priceString, 64)
+	ethPrice := getEthPrice()
+	//convert price from dollars to weis
+	var ratio float64
+	ratio = price/ethPrice
+	sendingPrice := int(ratio*1000000000000000000)
+	contract, err := returnImproContract()
+	if err != nil {
+		log.Println("Error getting impro contract", err)
+	}
+	keyString, err := getKey()
+	if err != nil {
+		log.Println("Error registering image", err)
+	}
+	key, err := crypto.HexToECDSA(keyString)
+	if err != nil {
+		log.Println("Error impossible to decode key to valid ECDSA key", err)
+	}
+
+	auth := bind.NewKeyedTransactor(key)
+	options := bind.TransactOpts{
+		auth.From,
+		auth.Nonce,
+		auth.Signer,
+		big.NewInt(0),
+		big.NewInt(gasP),
+		gasL,
+		auth.Context,
+	}
+	tx, err := contract.ChangePrice(&options, hash, big.NewInt(int64(sendingPrice)))
+	if err != nil {
+		log.Fatal("Error issuing buy transaction")
+	}
+	log.Println("Succesfully changed price. Transaction receipt: ", tx.Hash().Hex())
+}
 
 func getImage(fileName string) (image.Image, error){
 	file, err := os.Open(fileName)
@@ -288,6 +449,34 @@ func makePerceptionHash(image image.Image)(string, error){
 	return hash.ToString(), nil
 }
 
+type coinsData struct {
+	Symbol string `json:"symbol"`
+	Price  string `json:"price_usd"`
+}
+
+func getEthPrice() float64{
+	resp, err := http.Get("https://api.coinmarketcap.com/v1/ticker/ethereum/?convert=USD")
+	if err != nil {
+		log.Fatal("Error getting the price of ether")
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var coins []coinsData
+	err = json.Unmarshal(body, &coins)
+	if err != nil {
+		log.Fatal(err)
+	}
+	priceString := coins[0].Price
+	price, err := strconv.ParseFloat(priceString, 64)
+	if err != nil{
+		log.Println("Error converting string to int", err)
+	}
+	return price
+}
+
 
 
 func main() {
@@ -300,7 +489,7 @@ func main() {
 	app.Commands = []cli.Command{
 		{
 			Name: "key",
-			Usage: "set the key for the current session",
+			Usage: "Sets the key for the current session",
 			ArgsUsage: "ethereum private key",
 			Action: setKey,
 		},
@@ -311,30 +500,56 @@ func main() {
 		},
 		{
 			Name: "deploy",
-			Usage: "deploys a new impro contract",
+			Usage: "Deploys a new impro contract",
 			Action: deploy,
 		},
 		{
 			Name: "register",
-			Usage: "registers an image given a filename and a price",
+			Usage: "Registers an image. Given a filename, will create the perceptual hash and upload it to blockchain with a price.",
 			Action: registerImage,
 		},
 		{
 			Name: "price",
-			Usage: "gets price of an image",
+			Usage: "Gets price of an image",
+			ArgsUsage: "perceptual hash of the image",
 			Action: getPrice,
 		},
 		{
 			Name: "owner",
-			Usage: "gets owner of an image",
+			Usage: "Gets owner of an image",
+			ArgsUsage: "perceptual hash of the image",
 			Action: getOwner,
 		},
 		{
 			Name: "timestamp",
-			Usage: "gets timestamp of an image",
+			Usage: "Gets timestamp of an image",
+			ArgsUsage: "perceptual hash of the image",
 			Action: getTimestamp,
 		},
-
+		{
+			Name: "exists",
+			Usage: "Verifies if the hash was already uploaded",
+			ArgsUsage: "perceptual hash of the image",
+			Action: exists,
+		},
+		{
+			Name: "buy",
+			Usage: "Buys the right to an image",
+			ArgsUsage: "perceptual hash of the image",
+			Action: buy,
+		},
+		{
+			Name: "change",
+			Usage: "Changes the price of an image",
+			ArgsUsage: "perceptual hash of the image and new price",
+			Action: changePrice,
+		},
+		{
+			Name: "transfer",
+			Usage: "Transfers the ownership of an image",
+			ArgsUsage: "perceptual hash of the image and new owner address",
+			Action: transfer,
+		},
 	}
 
 	err := app.Run(os.Args)

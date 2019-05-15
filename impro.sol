@@ -9,7 +9,7 @@ contract Impro {
 
   struct Image {
        uint timestamp;
-       address owner;
+       address payable owner;
        int price;
    }
 
@@ -34,6 +34,8 @@ contract Impro {
 
    //Buy the ownership of an image
    function buy(string memory _perceptualHash) public payable{
+     address payable oldOwner = images[_perceptualHash].owner;
+     address payable newOwner = msg.sender;
      //Image must exists
      assert(exists(_perceptualHash));
      //Owner can't buy hiw own image
@@ -41,7 +43,23 @@ contract Impro {
      //Sufficient price is paid
      assert(int(msg.value) >= getPrice(_perceptualHash));
      //Change the owner
-     images[_perceptualHash].owner = msg.sender;
+     images[_perceptualHash].owner = newOwner;
+     //When the image is bought, the price is set to non-buyable
+     images[_perceptualHash].price = -1;
+     //Send the old owner the price of the image
+     oldOwner.transfer(msg.value);
+   }
+
+   //Transfer the ownership of an image
+   function transfer(string memory _perceptualHash, address payable _newOwner) public payable{
+     //Image must exists
+     assert(exists(_perceptualHash));
+     //Check person doing the transaction is owner of image
+     assert(msg.sender == getOwner(_perceptualHash));
+     //Change the owner
+     images[_perceptualHash].owner = _newOwner;
+     //When the image is transferred, the price is set to non-buyable
+     images[_perceptualHash].price = -1;
    }
 
    //Gets timestamp of an image
